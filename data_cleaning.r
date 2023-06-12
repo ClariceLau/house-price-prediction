@@ -218,3 +218,1024 @@ grid.arrange(grobs = plots_rest23attribute, ncol = 5)
 #   }
 # }
 
+library(arules)
+library(caret)
+library(catboost)
+library(cluster)
+library(dplyr)
+library(e1071)
+library(factoextra)
+library(ggplot2)
+library(glmnet)
+library(lattice)
+library(lightgbm)
+library(mlrMBO)
+library(randomForest)
+library(tidyr)
+library(viridis)
+library(xgboost)
+library(Metrics)
+library(Rtsne)
+library(DiceKriging)
+```
+
+```{r}
+source("data_cleaning.r")
+```
+
+## Data Transformation/Scaling
+
+#### Data preprocessing steps such as log transformation, scaling, and one-hot encoding.
+
+#### Data splitted into train, validation, and test sets and combines the training and validation sets for model training.
+
+#### Calculates and displays the skewness of the numerical features and target variable before and after the log transformations.
+
+Split the numerical variables into features and the target variable.
+
+```{r}
+X_num <- subset(numerical_data, select = -c(SalePrice))
+y <- subset(numerical_data, select = c(SalePrice))$SalePrice
+```
+
+Log Transformation for numerical features.
+
+```{r}
+skewness_before <- sapply(X_num, function(x) {
+  e1071::skewness(x)
+})
+
+X_num_skewed <- skewness_before[abs(skewness_before) > 0.75]
+
+for (x in names(X_num_skewed)) {
+  # bc <- BoxCoxTrans(X_num[[x]], lambda = 0.15)
+  # X_num[[x]] <- predict(bc, X_num[[x]])
+  X_num[[x]] <- log1p(X_num[[x]])
+}
+
+skewness_after <- sapply(X_num, function(x) {
+  e1071::skewness(x)
+})
+
+data.frame(skewness_before, skewness_after)
+```
+
+Log Transformation for the target variable.
+
+```{r}
+skewness_before <- e1071::skewness(y)
+
+y_t <- log1p(y)
+
+skewness_after <- e1071::skewness(y_t)
+
+sprintf("Before: %f, After: %f", skewness_before, skewness_after)
+```
+
+Scaling
+
+```{r}
+X_num <- scale(X_num)
+```
+
+One-Hot Encoding for categorical variables.
+
+```{r}
+encoder <- dummyVars(~., data = categorical_data)
+
+X_cat <- predict(encoder, newdata = categorical_data)
+X_cat <- data.frame(X_cat)
+```
+
+Split into train and validation and test sets.
+
+```{r}
+X <- cbind(X_cat, X_num)
+
+train_idx <- createDataPartition(y_t, p = 0.7, list = F)
+X_train <- X[train_idx, ]
+y_train <- y_t[train_idx]
+
+X_test <- X[-train_idx, ]
+y_test <- y_t[-train_idx]
+
+train_val_idx <- createDataPartition(y_train, p = 0.8, list = FALSE)
+X_train <- X_train[train_val_idx, ]
+y_train <- y_train[train_val_idx]
+
+X_val <- X_train[-train_val_idx, ]
+y_val <- y_train[-train_val_idx]
+
+X_train_val <- rbind(X_train, X_val)
+y_train_val <- c(y_train, y_val)
+```
+
+```{r}
+dim(X)
+length(y)
+
+dim(X_train)
+length(y_train)
+
+dim(X_val)
+length(y_val)
+
+names(X)
+```
+
+## Clustering
+
+#### The code executes PCA (Principal Component Analysis) to reduce the data's dimensionality and extract the principal components.
+
+#### Elbow method used to determine the best number of clusters.
+
+#### K-means clustering is performed on the principal components, assigning each observation to a specific cluster.
+
+#### The cluster assignments are appended to the principal components data, and a scatter plot is generated to visualize the resulting clusters.
+
+```{r}
+# Load the necessary libraries
+library(stats)
+library(factoextra)
+
+# Perform PCA on the data matrix
+pca_result <- prcomp(X)
+
+# Extract the principal components
+principal_components <- as.data.frame(pca_result$x)
+
+# Determine the optimal number of clusters using the elbow method
+fviz_nbclust(principal_components, kmeans, method = "wss")
+
+k <- 3
+# Perform K-means clustering on the principal components
+kmeans_result <- kmeans(principal_components, centers = k)
+cluster_assignments <- kmeans_result$cluster
+print(cluster_assignments)
+
+# Add the cluster assignments to the principal components data
+principal_components$cluster <- as.factor(cluster_assignments)
+
+ggplot(principal_components, aes(PC1, PC2, color = cluster)) +
+  geom_point() +
+  labs(x = "Principal Component 1", y = "Principal Component 2") +
+  scale_color_discrete(name = "Cluster") +
+ theme_minimal()
+```
+
+## t-SNE
+
+#### t-SNE (t-Distributed Stochastic Neighbor Embedding) is perfomed for dimensionality reduction and visualization of the data.
+
+## Function:
+
+#### Calculates the t-SNE coordinates
+
+#### Creates a dendrogram through hierarchical clustering
+
+#### Determines the number of clusters visually, assigns data points to clusters
+
+#### Computes centroids for each cluster
+
+#### Generates scatter plots to visualize the t-SNE coordinates colored by the original variable and cluster assignments
+
+#### Includes a bar plot showing the cluster frequencies and evaluates clustering quality using silhouette analysis.
+
+```{r}
+tsne <- Rtsne(X)
+tsne_df <- data.frame(tsne)
+```
+
+```{r}
+dist_mat <- dist(tsne$Y, method = "euclidean")
+hclust_avg <- hclust(dist_mat, method = "average")
+
+dend <- as.dendrogram(hclust_avg)
+plot(dend)
+```
+
+```{r}
+k = 15
+cut_avg <- cutree(hclust_avg, k)
+tsne_df$cluster <- cut_avg
+
+getCentroid <- function(points) {
+  xy <- numeric(2)
+  
+  xy[1] = mean(points[, 1])
+  xy[2] = mean(points[, 2])
+
+  return(xy)
+}
+
+centroids = matrix(0, k, 2)
+for (i in unique(cut_avg)) centroids[i, ] <- getCentroid(tsne$Y[cut_avg == i,])
+```
+
+```{r}
+tsne_df
+
+ggplot(tsne_df, aes(x=Y.1, y=Y.2, color=y)) +
+  geom_point() +
+  scale_color_gradientn(colours = heat.colors(10))
+
+ggplot(data.frame(table(tsne_df$cluster)), aes(x=Var1, y=Freq)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+
+ggplot(tsne_df, aes(x=Y.1, y=Y.2, color=cluster)) +
+  geom_point() +
+  scale_color_viridis() +
+  scale_fill_viridis(discrete = T) +
+  geom_point(data = data.frame(centroids), aes(x=X1, y=X2), color="black", fill="white", shape=21, size=8) +
+  geom_text(data = data.frame(centroids), aes(x=X1, y=X2, label=1:k), color="black")
+
+fviz_silhouette(silhouette(cutree(hclust_avg, k = k), dist_mat))
+
+```
+
+## Baselines
+
+#### Sets up empty lists to store RMSE values for baseline models on the training and testing datasets.
+
+#### Calculate performance metrics (MAE, MAPE, RMSE, MSE, R2) by converting predicted and actual values from transformed to original scale.
+
+#### Focus on data structures and the metrics calculation function.
+
+```{r}
+baselines_rmse <- list()
+
+baselines_rmse_test <- list()
+actual_metrics_test <- list()
+
+metrics_fusion <- function(y_pred, y) {
+  y_pred_inv <- expm1(y_pred)
+  y_inv <- expm1(y)
+
+  a <- mae(y_pred_inv, y_inv)
+  b <- mape(y_pred_inv, y_inv)
+  c <- rmse(y_pred_inv, y_inv)
+  d <- mse(y_pred_inv, y_inv)
+  e <- R2(y_pred_inv, y_inv)
+
+  return(c("mae" = a, "mape" = b, "rmse" = c, "mse" = d, "r2" = e))
+}
+```
+
+## Linear Regression
+
+#### Evaluates the performance of a linear regression model for a regression problem.
+
+#### Cross-validation used to train the model on the training and validation data.
+
+#### Resulting model is applied to make predictions on the validation dataset.
+
+#### Root mean squared error (RMSE) is calculated as a measure of prediction accuracy for the model on the validation data.
+
+#### Trained linear regression model used to make predictions on the test dataset.
+
+###3 RMSE is calculated by comparing the predicted values with the actual test values. \#### Stores additional performance metrics (MAE, MAPE, RMSE, MSE, R2) for the linear regression model on the test data.
+
+```{r}
+linreg_tc <- trainControl(method = "cv", number = 5)
+linreg_cv <- caret::train(
+  SalePrice ~ .,
+  data = cbind(X_train_val, SalePrice = y_train_val),
+  trControl = linreg_tc,
+  method = "lm"
+)
+
+# Validation predictions and metrics
+score_val <- linreg_cv$results$RMSE
+baselines_rmse$linear_regression <- score_val
+
+# Test predictions and metrics
+linreg <- lm(SalePrice ~ ., data = cbind(X_train_val, SalePrice = y_train_val))
+
+y_pred_test <- predict(linreg, newdata = X_test)
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$linear_regression <- score_test
+actual_metrics_test$linear_regression <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+score_val
+score_test
+```
+
+## Lasso Regression
+
+#### Lasso Regression applied to a regression problem.
+
+#### Model trained by using cross-validation and selects the optimal regularization parameter.
+
+#### Root mean squared error (RMSE) calculated for the validation set.
+
+#### For the test set, target variable predicted by using the trained model, calculates the RMSE
+
+#### Actual performance metrics (MAE, MAPE, RMSE, MSE, R2) computed for the Lasso Regression model on the test set
+
+#### Displays the validation RMSE and test RMSE.
+
+```{r}
+lasso <- cv.glmnet(x = as.matrix(X_train_val), y = y_train_val, alpha = 1)
+
+# Validation predictions and metrics
+score_val <- mean(sqrt(lasso$cvm))
+baselines_rmse$lasso <- score_val
+
+# Test predictions and metrics
+y_pred_test <- predict(lasso, newx = as.matrix(X_test))
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$lasso <- score_test
+actual_metrics_test$lasso <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+score_val
+score_test
+```
+
+## Ridge Regression
+
+#### Ridge Regression applied to a regression problem.
+
+#### Model trained by using cross-validation and selects the optimal regularization parameter.
+
+#### Root mean squared error (RMSE) calculated for the validation set.
+
+#### For the test set, it predicts the target variable using the trained model, calculates the RMSE.
+
+#### Actual performance metrics (MAE, MAPE, RMSE, MSE, R2) computed for the Ridge Regression model on the test set.
+
+#### Validation RMSE and test RMSE dsiplayed.
+
+```{r}
+ridge <- cv.glmnet(x = as.matrix(X_train_val), y = y_train_val, alpha = 0)
+
+# Validation predictions and metrics
+score_val <- mean(sqrt(ridge$cvm))
+baselines_rmse$ridge <- score_val
+
+# Test predictions and metrics
+y_pred_test <- predict(ridge, newx = as.matrix(X_test))
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$ridge <- score_test
+actual_metrics_test$ridge <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+score_val
+score_test
+```
+
+## Elastic Net
+
+#### Elastic Net Regression applied to a regression problem.
+
+#### Cross-validation peformed to select the optimal alpha parameter, which controls the balance between L1 (Lasso) and L2 (Ridge) regularization.
+
+#### The root mean squared error (RMSE) calculated for the validation set.
+
+#### For the test set, it predicts the target variable using the trained Elastic Net model with the selected alpha value, calculates the RMSE.
+
+#### Actual performance metrics (MAE, MAPE, RMSE, MSE, R2) computed for the Elastic Net model on the test set.
+
+#### Selected alpha, validation RMSE, and test RMSE.
+
+```{r}
+results <- data.frame()
+
+for (i in 0:20) {
+  elasticnet <- cv.glmnet(x = as.matrix(X_train_val), y = y_train_val, alpha = i/20)
+
+  row <- data.frame(alpha = i/20, rmse_val = mean(sqrt(elasticnet$cvm)))
+  results <- rbind(results, row)
+}
+
+best_alpha <- results$alpha[which.min(results$rmse_val)]
+
+# Validation predictions and metrics
+score_val <- min(results$rmse_val)
+baselines_rmse$elasticnet <- score_val
+
+# Test predictions and metrics
+elasticnet <- cv.glmnet(x = as.matrix(X_train_val), y = y_train_val, alpha = best_alpha)
+
+y_pred_test <- predict(elasticnet, newx = as.matrix(X_test))
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$elasticnet <- score_test
+actual_metrics_test$elasticnet <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+best_alpha
+score_val
+score_test
+```
+
+## K-Nearest Neighbors Regression
+
+#### K-Nearest Neighbors Regression applied to the data
+
+#### Calculates the RMSE for validation and test sets, and stores the results.
+
+#### Additional performance metrics computed and displays the RMSE values.
+
+```{r}
+knn_tc <- trainControl(method = "cv", number = 5)
+knn_cv <- caret::train(
+  SalePrice ~ .,
+  data = cbind(X_train_val, SalePrice = y_train_val),
+  trControl = knn_tc,
+  method = "knn"
+)
+
+# Validation predictions and metrics
+score_val <- mean(knn_cv$results$RMSE)
+baselines_rmse$knn <- score_val
+
+# Test predictions and metrics
+knn <- knnreg(x = X_train_val, y = y_train_val)
+
+y_pred_test <- predict(knn, newdata = X_test)
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$knn <- score_test
+actual_metrics_test$knn <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+score_val
+score_test
+```
+
+## Support Vector Regression
+
+#### Support Vector Regression (SVR) applied to the data
+
+### Calculates the RMSE for validation and test sets, and stores the results.
+
+### Additional performance metrics computed and displays the RMSE values.
+
+```{r}
+svr_tc <- trainControl(method = "cv", number = 5)
+svr_cv <- caret::train(
+  SalePrice ~ .,
+  data = cbind(X_train_val, SalePrice = y_train_val),
+  trControl = svr_tc,
+  method = "svmLinear2"
+)
+
+# Validation predictions and metrics
+score_val <- mean(svr_cv$results$RMSE)
+baselines_rmse$svr <- score_val
+
+# Test predictions and metrics
+svr <- e1071::svm(SalePrice ~ ., data = cbind(X_train_val, SalePrice = y_train_val))
+
+y_pred_test <- predict(svr, newdata = X_test)
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$svr <- score_test
+actual_metrics_test$svr <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+score_val
+score_test
+```
+
+## Decision Tree
+
+#### Decision Tree regression applied to the data.
+
+#### Calculates the RMSE for validation and test sets, and stores the results.
+
+#### Additional performance metrics computed and displays the RMSE values.
+
+```{r}
+dt_tc <- trainControl(method = "cv", number = 5)
+dt_cv <- caret::train(
+  SalePrice ~ .,
+  data = cbind(X_train_val, SalePrice = y_train_val),
+  trControl = dt_tc,
+  method = "rpart"
+)
+
+# Validation predictions and metrics
+score_val <- mean(dt_cv$results$RMSE, na.rm = TRUE)
+baselines_rmse$decision_tree <- score_val
+
+# Test predictions and metrics
+dt <- caret::train(x = X_train_val, y = y_train_val, method = "rpart")
+
+y_pred_test <- predict(dt, newdata = X_test)
+score_test <- rmse(y_pred_test, y_test)
+baselines_rmse_test$decision_tree <- score_test
+actual_metrics_test$decision_tree <- metrics_fusion(y_pred_test, y_test)
+
+# Display scores
+score_val
+score_test
+```
+
+## Ensemble Learning
+
+#### Empty lists initialized that will be used to store the RMSE values and actual performance metrics for ensemble learning models.
+
+#### Empty lists will be populated with values in subsequent steps of the code.
+
+```{r}
+ensemble_rmse <- list()
+ensemble_actual_metrics <- list()
+
+ensemble_rmse_test <- list()
+ensemble_actual_metrics_test <- list()
+```
+
+## Random Forest
+
+#### Random forest algorithm implemented for regression tasks using ensemble learning.
+
+#### Rrandom forest model trained on the training and validation data.
+
+#### Its performance is evaluated using root mean squared error (RMSE) on the validation and test datasets.
+
+#### Calculate feature importance using the random forest model and creates a bar plot to visualize the top 30 important features.
+
+```{r}
+rf_tc <- trainControl(method = "cv", number = 5)
+rf_cv <- caret::train(
+  SalePrice ~ .,
+  data = cbind(X_train_val, SalePrice = y_train_val),
+  trControl = rf_tc,
+  method = "rf"
+)
+
+# Validation predictions and metrics
+score_val <- mean(rf_cv$results$RMSE)
+ensemble_rmse$random_forest <- score_val
+
+# Test predictions and metrics
+rf <- randomForest(x = X_train_val, y = y_train_val, proximity = T)
+
+y_pred_test_rf <- predict(rf, newdata = X_test)
+score_test <- rmse(y_pred_test_rf, y_test)
+ensemble_rmse_test$random_forest <- score_test
+ensemble_actual_metrics_test$random_forest <- metrics_fusion(y_pred_test_rf, y_test)
+
+y_pred_train_rf <- predict(rf, newdata = X_train_val)
+# Display scores
+score_val
+score_test
+```
+
+```{r}
+rf_df <- data.frame(rf$importance) %>%
+  mutate(Feature = rownames(rf$importance)) %>%
+  arrange(desc(IncNodePurity)) %>%
+  head(30)
+
+rf_df
+ggplot(data = rf_df, aes(x = reorder(Feature, IncNodePurity), y = IncNodePurity)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+
+## Gradient-Boosted Trees
+
+#### Gradient-Boosted Trees (GBT) using XGBoost, LightGBM, and CatBoost libraries implemented for regression tasks.
+
+#### The models are trained on the training and validation data, and their performance is evaluated using RMSE on the validation and test datasets.
+
+#### The best hyperparameters are determined through cross-validation, and the models are then used to make predictions on the test data.
+
+#### The RMSE scores and other evaluation metrics are recorded for each model.
+
+#### The feature importance of the GBT model is visualized using a bar chart.
+
+#### Code snippet showcases the application of ensemble learning techniques for regression tasks using boosting algorithms.
+
+```{r}
+dtrain_val <- xgb.DMatrix(data = as.matrix(X_train_val), label = y_train_val)
+dtest <- xgb.DMatrix(data = as.matrix(X_test), label = y_test)
+
+xgb_params = list(
+  eta = 0.01,
+  gamma = 0.0468,
+  max_depth = 6,
+  min_child_weight = 1.41,
+  subsample = 0.769,
+  colsample_bytree = 0.283
+)
+
+xgb_cv <- xgb.cv(
+  params = xgb_params,
+  data = dtrain_val,
+  nround = 10000,
+  nfold = 5,
+  prediction = F,
+  showsd = T,
+  metrics = "rmse",
+  verbose = 1,
+  print_every_n = 500,
+  early_stopping_rounds = 25
+)
+
+# Validation predictions and metrics
+score_val <- xgb_cv$evaluation_log$test_rmse_mean %>% min
+ensemble_rmse$xgboost <- score_val
+
+# Test predictions and metrics
+xgb <- xgboost(
+  params = xgb_params,
+  data = dtrain_val,
+  nround = 10000,
+  eval_metric = "rmse",
+  verbose = 1,
+  print_every_n = 500,
+  early_stopping_rounds = 25
+)
+
+y_pred_test_xgb <- predict(xgb, newdata = dtest)
+score_test <- rmse(y_pred_test_xgb, y_test)
+ensemble_rmse_test$xgboost_test <- score_test
+ensemble_actual_metrics_test$xgboost_test <- metrics_fusion(y_pred_test_xgb, y_test)
+
+y_pred_train_xgb <- predict(xgb, newdata = dtrain_val)
+
+# Display scores
+score_val
+score_test
+```
+
+```{r}
+xgb_df <- xgb.importance(model = xgb) %>% head(30)
+
+xgb_df
+ggplot(data = xgb_df, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+
+```{r}
+objective_fn <- makeSingleObjectiveFunction(
+  fn = function(x) {
+    params = list(
+      booster = "gbtree",
+      eta = x["eta"],
+      gamma = x["gamma"],
+      max_depth = x["max_depth"],
+      min_child_weight = x["min_child_weight"],
+      subsample = x["subsample"],
+      colsample_bytree = x["colsample_bytree"],
+      max_delta_step = x["max_delta_step"]
+    )
+
+    cv <- xgb.cv(
+      params = params,
+      data = dtrain_val,
+      nround = 10000,
+      nfold = 5,
+      prediction = F,
+      showsd = T,
+      metrics = "rmse",
+      verbose = 1,
+      print_every_n = 500,
+      early_stopping_rounds = 25
+    )
+
+    cv$evaluation_log$test_rmse_mean %>% min
+  },
+  par.set = makeParamSet(
+    makeNumericParam("eta", lower = 0.005, upper = 0.01),
+    makeNumericParam("gamma", lower = 0.01, upper = 5),
+    makeIntegerParam("max_depth", lower = 2, upper = 10),
+    makeIntegerParam("min_child_weight", lower = 1, upper = 2000),
+    makeNumericParam("subsample", lower = 0.20,  upper = 0.8),
+    makeNumericParam("colsample_bytree", lower = 0.20, upper = 0.8),
+    makeNumericParam("max_delta_step", lower = 0, upper = 5)
+  ),
+  minimize = TRUE
+)
+
+#Train model
+design <- generateDesign(n = 1000, par.set = getParamSet(objective_fn), fun = lhs::randomLHS)
+control <- makeMBOControl() %>% setMBOControlTermination(., iters = 10)
+
+#run <- mbo(
+#  fun = objective_fn,
+#  design = design,
+#  learner = makeLearner("regr.km", predict.type = "se", covtype = "matern3_2", control = list(trace = FALSE)),
+#  control = control,
+#  show.info = TRUE
+#)
+```
+
+```{r}
+# Best parameters
+#run$x
+```
+
+```{r}
+lgb_train_val <- lgb.Dataset(data = as.matrix(X_train_val), label = y_train_val)
+lgb_test <- lgb.Dataset(data = as.matrix(X_test), label = y_test)
+
+params <- list(
+  objective = "regression",
+  metric = "rmse",
+  boosting_type = "gbdt",
+  num_boost_round = 100,
+  num_leaves = 15,
+  learning_rate = 0.1,
+  feature_fraction = 0.9,
+  bagging_fraction = 0.8,
+  bagging_freq = 5
+)
+
+lgb_cv <- lgb.cv(
+  params = params,
+  data = lgb_train_val,
+  early_stopping_rounds = 25,
+  verbose = 0
+)
+
+# Validation predictions and metrics
+score_val <- min(unlist(lgb_cv$record_evals$valid$rmse$eval))
+ensemble_rmse$lightgbm <- score_val
+
+# Test predictions and metrics
+lgb <- lgb.train(
+  params = params,
+  data = lgb_train_val,
+  verbose = 0
+)
+
+y_pred_test_lgb <- predict(lgb, data = as.matrix(X_test))
+score_test <- rmse(y_pred_test_lgb, y_test)
+ensemble_rmse_test$lightgbm <- score_test
+ensemble_actual_metrics_test$lightgbm <- metrics_fusion(y_pred_test_lgb, y_test)
+
+y_pred_train_lgb <- predict(lgb, data = as.matrix(X_train_val))
+# Display scores
+score_val
+score_test
+```
+
+```{r}
+lgb_df <- lgb.importance(model = lgb) %>% head(30)
+
+lgb_df
+ggplot(data = xgb_df, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+
+```{r}
+train_val_pool <- catboost.load_pool(data = X_train_val, label = y_train_val)
+test_pool <- catboost.load_pool(data = X_test, label = y_test)
+
+params <- list(
+  loss_function = "RMSE",
+  iterations = 10000,
+  learning_rate = 0.01,
+  metric_period = 1000
+)
+
+catb_cv <- catboost.cv(
+  train_val_pool,
+  params = params,
+  fold_count = 5,
+  early_stopping_rounds = 25
+)
+
+# Validation predictions and metrics
+score_val <- min(catb_cv$test.RMSE.mean)
+ensemble_rmse$catboost <- score_val
+
+# Test predictions and metrics
+catb <- catboost.train(
+  params = params,
+  learn_pool = train_val_pool
+)
+
+y_pred_test_catboost <- catboost.predict(catb, test_pool)
+score_test <- rmse(y_pred_test_catboost, y_test)
+ensemble_rmse_test$catboost <- score_test
+ensemble_actual_metrics_test$catboost <- metrics_fusion(y_pred_test_catboost, y_test)
+
+y_pred_train_catboost <- catboost.predict(catb, train_val_pool)
+# Display scores
+score_val
+score_test
+```
+
+```{r}
+catb_df <- data.frame(catboost.get_feature_importance(catb))
+catb_df <- catb_df %>%
+  mutate(Feature = rownames(catb_df)) %>%
+  rename(Importance = catboost.get_feature_importance.catb.) %>%
+  arrange(desc(Importance)) %>%
+  head(30)
+
+catb_df
+ggplot(data = catb_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+
+## Association Rule Mining on Housing Characteristics
+
+#### Code snippet performs association rule mining on housing characteristics using the Apriori algorithm.
+
+#### Converts categorical data into transactions and applies the Apriori algorithm to find frequent itemsets.
+
+#### Generate association rules using given support and confidence thresholds.
+
+#### The code includes a dictionary to map column names and values to their corresponding descriptions for better rule interpretation.
+
+#### Top ten association rules with their corresponding explanations displayed, including the antecedent (IF) and consequent (THEN) parts along with their descriptions and confidence percentages.
+
+```{r}
+transactions <- transactions(categorical_data)
+summary(transactions)
+```
+
+```{r}
+inspect(head(transactions, n = 1))
+```
+
+```{r}
+rules <- apriori(transactions, parameter = list(support = 0.95, confidence = 0.95))
+```
+
+```{r}
+summary(rules)
+```
+
+```{r}
+con <- file("data_description.txt", open = "r")
+
+column_dictionary <- list()
+value_dictionary <- list()
+
+repeat {
+  line <- readLines(con, n = 1)
+
+  if (length(line) == 0) {
+    break
+  }
+
+  first_character <- substr(line, 1, 1)
+
+  if (first_character == "") {
+    next
+  }
+
+  if (first_character != " ") {
+    column_name <- sub(":.*", "", line)
+    column_description <- trimws(sub(".*:", "", line))
+
+    column_dictionary[[column_name]] <- column_description
+    value_dictionary[[column_name]] <- list()
+  } else {
+    pairs <- unlist(strsplit(line, "\t"))
+    key <- trimws(pairs[1])
+    value <- trimws(pairs[2])
+
+    value_dictionary[[column_name]][[key]] <- value
+  }
+}
+
+close(con)
+```
+
+```{r}
+rules_top_ten_df <- data.frame(
+  lhs = labels(lhs(rules)),
+  rhs = labels(rhs(rules)),
+  rules@quality
+) %>% arrange(desc(lift)) %>% head(n = 20)
+```
+
+```{r}
+for (i in 1:nrow(rules_top_ten_df)) {
+  row <- rules_top_ten_df[i, ]
+
+  explanation <- ""
+  lhs <- unlist(strsplit(gsub('^.|.$', '', row["lhs"]), ","))
+
+  for (i in 1:length(lhs)) {
+    pair <- unlist(strsplit(lhs[i], "="))
+    key <- pair[1]
+    value <- pair[2]
+
+    key_t <- column_dictionary[[key]]
+    value_t <- value_dictionary[[key]][[value]]
+
+    if (i == 1) {
+      explanation <- paste("IF", key_t, "=", value_t)
+    } else {
+      explanation <- paste(explanation, "AND", key_t, "=", value_t)
+    }
+  }
+
+  rhs <- unlist(strsplit(gsub('^.|.$', '', row["rhs"]), "="))
+  key <- rhs[1]
+  value <- rhs[2]
+
+  key_t <- column_dictionary[[key]]
+  value_t <- value_dictionary[[key]][[value]]
+
+  confidence_pct <- format(round(row["confidence"] * 100, 2), 2)
+
+  explanation <- paste(explanation, "THEN", key_t, "=", value_t, "(Confidence:", paste0(confidence_pct, "%)"))
+  print(explanation)
+  cat("\n")
+}
+```
+
+## Stacking
+
+#### Stacking is performed by combining the predictions from different models (Random Forest, XGBoost, LightGBM, CatBoost) into a new dataset.
+
+#### Linear regression model is trained on the stacked dataset to learn the relationship between ensemble predictions and the actual target values.
+
+#### Model's predictions on the test dataset are evaluated using root mean squared error (RMSE).
+
+#### Metrics fusion function is applied to assess the performance of the stacking ensemble.
+
+```{r}
+stacked_data <- data.frame(y = y_train_val, prediction_rf = y_pred_train_rf, prediction_xgb = y_pred_train_xgb, prediction_lgb = y_pred_train_lgb, prediction_catboost = y_pred_train_catboost)
+
+stacked_data_test <- data.frame(y = y_test, prediction_rf = y_pred_test_rf, prediction_xgb = y_pred_test_xgb, prediction_lgb = y_pred_test_lgb, prediction_catboost = y_pred_test_catboost)
+
+model_meta <- caret::train(y ~ ., data = stacked_data, method = "lm")
+predictions_meta <- predict(model_meta, newdata = stacked_data_test)
+
+ensemble_rmse_test$stacking_score <- rmse(predictions_meta, y_test)
+ensemble_actual_metrics_test$stacking <- metrics_fusion(predictions_meta, y_test)
+```
+
+## Comparison
+
+#### Compares the performance of different models and ensembles using the root mean squared error (RMSE) metric.
+
+#### Bar charts created to display the RMSE values, with the x-axis representing the models and the y-axis representing the RMSE.
+
+#### First set of plots focuses on the baseline models on both the training and test sets.
+
+#### Second set focuses on the ensemble models on both the training and test sets.
+
+#### Purpose is to compare the models' performance and determine which ones have the lowest RMSE, indicating better predictive accuracy.
+
+```{r}
+# Plot RMSE for baseline models
+df <- data.frame(models = names(baselines_rmse), rmse = unlist(baselines_rmse))
+df
+
+ggplot(df, aes(x = models, y = rmse)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Models") +
+  ylab("RMSE") +
+  ylim(0, 0.35) +
+  ggtitle("Baseline RMSE") +
+  theme_minimal()
+
+# Plot RMSE for ensemble models
+df <- data.frame(models = names(ensemble_rmse), rmse = unlist(ensemble_rmse))
+df
+
+ggplot(df, aes(x = models, y = rmse)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Models") +
+  ylab("RMSE") +
+  ylim(0, 0.35) +
+  ggtitle("Ensemble RMSE") +
+  theme_minimal()
+```
+
+```{r}
+# Plot RMSE for baseline models on the test set
+df <- data.frame(models = names(baselines_rmse_test), rmse = unlist(baselines_rmse_test))
+df
+
+ggplot(df, aes(x = models, y = rmse)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Models") +
+  ylab("RMSE") +
+  ylim(0, 0.35) +
+  ggtitle("Baseline RMSE") +
+  theme_minimal()
+
+# Plot RMSE for ensemble models on the test set
+df <- data.frame(models = names(ensemble_rmse_test), rmse = unlist(ensemble_rmse_test))
+df
+
+ggplot(df, aes(x = models, y = rmse)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Models") +
+  ylab("RMSE") +
+  ylim(0, 0.35) +
+  ggtitle("Ensemble RMSE") +
+  theme_minimal()
+```
+
+```{r}
+data.frame(t(data.frame(actual_metrics_test))) %>% arrange(desc(r2))
+data.frame(t(data.frame(ensemble_actual_metrics_test))) %>% arrange(desc(r2))
+save(list=ls(), file="assignment_model")
+```
